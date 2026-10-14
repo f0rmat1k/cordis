@@ -171,11 +171,33 @@ function connect() {
   };
 }
 
+// Random name so you can just press «Войти»; must fit the server's NAME_RE (≤ 24 chars).
+const ADJECTIVES = ['Весёлый', 'Хитрый', 'Сонный', 'Быстрый', 'Тихий', 'Смелый', 'Добрый', 'Ловкий',
+  'Мудрый', 'Рыжий', 'Шустрый', 'Важный', 'Бодрый', 'Пушистый', 'Звонкий', 'Ясный'];
+const ANIMALS = ['Ёж', 'Лис', 'Барсук', 'Енот', 'Кот', 'Волк', 'Филин', 'Бобр', 'Медведь', 'Заяц',
+  'Сокол', 'Тюлень', 'Пингвин', 'Хомяк', 'Олень', 'Дельфин'];
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
+const randomName = () => pick(ADJECTIVES) + pick(ANIMALS) + Math.floor(10 + Math.random() * 90);
+let generatedName = null; // name in the field, if we made it up
+
+function fillRandomName() {
+  generatedName = randomName();
+  $('#login-name').value = generatedName;
+  $('#login-name').select();
+}
+
 function showLogin() {
   show('login');
   $('#login-hint').textContent = pendingAdd ? `После входа ${pendingAdd} появится в ваших контактах.` : '';
+  if (!$('#login-name').value) fillRandomName();
   $('#login-name').focus();
+  $('#login-name').select();
 }
+
+$('#login-random').onclick = () => {
+  fillRandomName();
+  $('#login-name').focus();
+};
 
 $('#login-form').onsubmit = (e) => {
   e.preventDefault();
@@ -232,6 +254,12 @@ function handle(msg) {
       onSignal(msg.from, msg.data);
       break;
     case 'error':
+      // Made-up name collided with an existing one — quietly try another.
+      if (msg.message === 'Это имя уже занято' && !me && $('#login-name').value === generatedName) {
+        fillRandomName();
+        sendMsg({ type: 'register', name: generatedName });
+        break;
+      }
       toast(msg.message);
       break;
   }
