@@ -41,7 +41,8 @@ export class MicPipeline {
 
     if (!this.out) {
       this.out = this.ctx.createMediaStreamDestination();
-      this.gain = this.ctx.createGain();
+      // Everything after this point is mono; the destination upmixes it to both ears.
+      this.gain = new GainNode(this.ctx, { channelCount: 1, channelCountMode: 'explicit' });
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 512;
       this.gain.connect(this.out);
@@ -105,8 +106,12 @@ export class MicPipeline {
     }
     this.nsNode = node;
     if (node) {
+      // The worklet outputs stereo but processes only channel 0 (maxChannels: 1),
+      // leaving the right channel silent. Take just the processed channel.
+      this.splitter ??= this.ctx.createChannelSplitter(2);
       this.source.connect(node);
-      node.connect(this.gain);
+      node.connect(this.splitter);
+      this.splitter.connect(this.gain, 0);
     } else {
       this.source.connect(this.gain);
     }
