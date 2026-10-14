@@ -1,7 +1,7 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
@@ -10,6 +10,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.join(root, 'data');
 const DB_FILE = path.join(DATA_DIR, 'users.json');
+const MODELS_DIR = path.join(root, 'models');
 
 // ICE servers sent to clients. STUN is enough for most home networks;
 // set TURN_URL/TURN_USER/TURN_PASS if a call connects but there is no sound.
@@ -35,6 +36,31 @@ const save = () => {
 const app = express();
 app.use(express.static(path.join(root, 'public')));
 app.use('/ns', express.static(path.join(root, 'node_modules/@sapphi-red/web-noise-suppressor/dist')));
+app.use('/dfn3', express.static(path.join(root, 'node_modules/deepfilternet3-noise-filter/dist')));
+app.use('/models/dfn3', express.static(path.join(MODELS_DIR, 'dfn3'), { maxAge: '30d', immutable: true }));
+app.get('/models/dfn3/ready', (req, res) => res.json({ ready: dfn3Ready }));
+
+// ---------- DeepFilterNet3 assets ----------
+// ~24 MB, too big for git: downloaded once in the background and served
+// from our own origin so clients never hit a third-party CDN.
+const DFN3_CDN = 'https://cdn.mezon.ai/AI/models/datas/noise_suppression/deepfilternet3';
+const DFN3_FILES = ['v3/pkg/df_bg.wasm', 'v3/models/DeepFilterNet3_onnx.tar.gz'];
+let dfn3Ready = false;
+
+async function fetchDfn3() {
+  for (const file of DFN3_FILES) {
+    const dest = path.join(MODELS_DIR, 'dfn3', file);
+    if (existsSync(dest)) continue;
+    console.log(`dfn3: downloading ${file}`);
+    const res = await fetch(`${DFN3_CDN}/${file}`);
+    if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`);
+    mkdirSync(path.dirname(dest), { recursive: true });
+    writeFileSync(dest + '.part', Buffer.from(await res.arrayBuffer()));
+    renameSync(dest + '.part', dest);
+  }
+  dfn3Ready = true;
+}
+fetchDfn3().catch((e) => console.error('dfn3: download failed:', e.message));
 const server = createServer(app);
 
 // ---------- signaling ----------

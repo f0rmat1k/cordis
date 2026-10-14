@@ -1,4 +1,4 @@
-import { MicPipeline, MODES } from './audio.js';
+import { MicPipeline, MODES, DEFAULT_STRENGTH } from './audio.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -56,16 +56,40 @@ function renderContacts() {
 }
 
 // Noise-suppression selects (one in settings, one in the call window).
+// ('ns-mode2': the default changed to DeepFilterNet3, so old saved choices are dropped.)
+mic.mode = store.get('ns-mode2') || 'dfn3';
+mic.strength = Number(store.get('ns-strength')) || DEFAULT_STRENGTH;
+
+function syncNsUI() {
+  for (const sel of $$('.ns-select')) sel.value = mic.mode;
+  for (const r of $$('.ns-strength')) r.value = mic.strength;
+  for (const v of $$('.ns-strength-value')) v.textContent = mic.strength >= 100 ? 'макс.' : `${mic.strength} дБ`;
+  for (const l of $$('label.strength')) l.classList.toggle('hidden', mic.mode !== 'dfn3');
+}
+
 for (const sel of $$('.ns-select')) {
   for (const [value, label] of Object.entries(MODES)) sel.add(new Option(label, value));
-  sel.value = store.get('ns-mode') || 'gtcrn';
   sel.onchange = async () => {
-    for (const other of $$('.ns-select')) other.value = sel.value;
-    store.set('ns-mode', sel.value);
-    try { await mic.setMode(sel.value); } catch (e) { toast('Не удалось включить режим: ' + e.message); }
+    const prev = mic.mode;
+    store.set('ns-mode2', sel.value);
+    if (sel.value === 'dfn3' && !mic.dfn3Registered && mic.stream) toast('Загружаю модель DeepFilterNet3 (~24 МБ, только в первый раз)…');
+    try {
+      await mic.setMode(sel.value);
+    } catch (e) {
+      toast('Не удалось включить режим: ' + e.message);
+      mic.mode = prev;
+    }
+    syncNsUI();
   };
 }
-mic.mode = store.get('ns-mode') || 'gtcrn';
+for (const r of $$('.ns-strength')) {
+  r.oninput = () => {
+    mic.setStrength(Number(r.value));
+    store.set('ns-strength', r.value);
+    syncNsUI();
+  };
+}
+syncNsUI();
 
 async function refreshDevices() {
   const sel = $('#mic-select');
@@ -93,7 +117,16 @@ navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices);
 
 async function ensureMic() {
   if (!window.isSecureContext) throw new Error('Микрофон доступен только по HTTPS');
-  await mic.start(mic.mode, store.get('mic') || undefined);
+  if (mic.mode === 'dfn3' && !mic.dfn3Registered) toast('Загружаю модель DeepFilterNet3 (~24 МБ, только в первый раз)…');
+  try {
+    await mic.start(mic.mode, store.get('mic') || undefined);
+  } catch (e) {
+    if (mic.mode !== 'dfn3' || e.name === 'NotAllowedError' || e.name === 'NotFoundError') throw e;
+    // Model unavailable (e.g. the server is still downloading it): don't block the call.
+    toast('DeepFilterNet3 не загрузилась, включаю GTCRN');
+    await mic.start('gtcrn', store.get('mic') || undefined);
+    syncNsUI();
+  }
   refreshDevices();
 }
 

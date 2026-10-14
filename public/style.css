@@ -124,3 +124,7 @@ button.icon { padding: 6px 10px; }
   padding: 10px 16px; border-radius: 8px;
   max-width: calc(100% - 32px);
 }
+
+label.strength span { display: flex; justify-content: space-between; }
+label.strength b { color: var(--text); font-weight: 600; }
+input[type="range"] { padding: 0; accent-color: var(--accent); background: none; border: none; }

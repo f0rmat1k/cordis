@@ -41,6 +41,7 @@
     <div class="card">
       <h2>Микрофон</h2>
       <label>Шумоподавление <select class="ns-select"></select></label>
+      <label class="strength"><span>Сила подавления: <b class="ns-strength-value"></b></span><input type="range" class="ns-strength" min="10" max="100" step="5"></label>
       <label>Устройство <select id="mic-select"><option value="">По умолчанию</option></select></label>
       <div class="row">
         <button id="mic-test">Проверить микрофон</button>
@@ -58,6 +59,7 @@
       <p id="call-status" class="muted"></p>
       <div class="meter"><div class="meter-fill"></div></div>
       <label class="inline">Шумоподавление <select class="ns-select"></select></label>
+      <label class="strength inline"><span>Сила подавления: <b class="ns-strength-value"></b></span><input type="range" class="ns-strength" min="10" max="100" step="5"></label>
       <div class="row center" id="call-incoming-actions">
         <button id="call-accept" class="primary">Принять</button>
         <button id="call-decline" class="danger">Отклонить</button>

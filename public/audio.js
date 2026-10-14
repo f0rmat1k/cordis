@@ -4,7 +4,8 @@
 //                                     \-> analyser (level meter)
 //
 // Modes:
-//   gtcrn   – neural model GTCRN (best quality, default)
+//   dfn3    – neural model DeepFilterNet3 (best quality, adjustable strength, default)
+//   gtcrn   – neural model GTCRN (tiny, aggressive)
 //   rnnoise – neural model RNNoise (lighter, older)
 //   browser – built-in WebRTC noise suppression (what Chrome/Firefox do by default)
 //   off     – no suppression
@@ -12,7 +13,8 @@
 import { GtcrnWorkletNode, loadGtcrn, RnnoiseWorkletNode, loadRnnoise } from '/ns/index.js';
 
 export const MODES = {
-  gtcrn: 'GTCRN (нейросеть, макс. качество)',
+  dfn3: 'DeepFilterNet3 (нейросеть, лучшее)',
+  gtcrn: 'GTCRN (нейросеть, лёгкая)',
   rnnoise: 'RNNoise (нейросеть, легче)',
   browser: 'Встроенное в браузер',
   off: 'Выключено',
@@ -25,9 +27,31 @@ const loadWasm = {
 };
 const workletUrl = { gtcrn: '/ns/gtcrn/workletProcessor.js', rnnoise: '/ns/rnnoise/workletProcessor.js' };
 
+// DeepFilterNet3: ~24 MB of wasm + model, fetched once and then cached by the browser.
+let dfn3Core;
+const loadDfn3 = async () => {
+  if (!dfn3Core) {
+    dfn3Core = (async () => {
+      const { DeepFilterNet3Core } = await import('/dfn3/index.esm.js');
+      const core = new DeepFilterNet3Core({
+        sampleRate: 48000,
+        assetConfig: { cdnUrl: `${location.origin}/models/dfn3` },
+      });
+      await core.initialize();
+      return core;
+    })();
+    dfn3Core.catch(() => (dfn3Core = null));
+  }
+  return dfn3Core;
+};
+
+// Strength of DeepFilterNet3 = max noise attenuation in dB. Lower keeps the voice
+// more natural, higher removes more (100 = no limit).
+export const DEFAULT_STRENGTH = 100;
 export class MicPipeline {
   constructor() {
-    this.mode = 'gtcrn';
+    this.mode = 'dfn3';
+    this.strength = DEFAULT_STRENGTH;
     this.ctx = null;
     this.stream = null;
     this.nsNode = null;
@@ -77,17 +101,26 @@ export class MicPipeline {
     this.mode = mode;
     if (!this.ctx) return;
 
-    if (browserNsChanged) {
-      const track = this.stream.getAudioTracks()[0];
-      try {
-        await track.applyConstraints({ ...track.getConstraints(), noiseSuppression: mode === 'browser' });
-      } catch {
-        await this.openMic();
-      }
-    }
+    // Chrome silently ignores applyConstraints() for audio processing flags,
+    // so toggling the built-in suppressor needs a fresh capture.
+    if (browserNsChanged) await this.openMic();
 
     let node = null;
-    if (mode === 'gtcrn' || mode === 'rnnoise') {
+    if (mode === 'dfn3') {
+      const core = await loadDfn3();
+      if (this.dfn3Registered) {
+        // The processor is already registered in this context; registering again throws.
+        const { wasmModule, modelBytes } = core.assets;
+        node = new AudioWorkletNode(this.ctx, 'deepfilter-audio-processor', {
+          processorOptions: { wasmModule, modelBytes, suppressionLevel: this.strength },
+        });
+      } else {
+        core.config.noiseReductionLevel = this.strength;
+        node = await core.createAudioWorkletNode(this.ctx);
+        this.dfn3Registered = true;
+      }
+      node.isDfn3 = true;
+    } else if (mode === 'gtcrn' || mode === 'rnnoise') {
       const wasmBinary = await loadWasm[mode]();
       if (!this.loadedWorklets.has(mode)) {
         await this.ctx.audioWorklet.addModule(workletUrl[mode]);
@@ -100,10 +133,7 @@ export class MicPipeline {
 
     // Rewire the graph.
     this.source.disconnect();
-    if (this.nsNode) {
-      this.nsNode.disconnect();
-      this.nsNode.destroy?.();
-    }
+    this.dropNsNode();
     this.nsNode = node;
     if (node) {
       // The worklet outputs stereo but processes only channel 0 (maxChannels: 1),
@@ -115,6 +145,20 @@ export class MicPipeline {
     } else {
       this.source.connect(this.gain);
     }
+  }
+
+  setStrength(db) {
+    this.strength = db;
+    if (this.nsNode?.isDfn3) this.nsNode.port.postMessage({ type: 'SET_SUPPRESSION_LEVEL', value: Math.round(db) });
+  }
+
+  dropNsNode() {
+    const n = this.nsNode;
+    if (!n) return;
+    n.disconnect();
+    if (n.isDfn3) n.port.postMessage({ type: 'SET_BYPASS', value: true });
+    n.destroy?.();
+    this.nsNode = null;
   }
 
   set muted(v) {
@@ -144,6 +188,6 @@ export class MicPipeline {
     this.stream = null;
     this.source?.disconnect();
     this.source = null;
-    if (this.nsNode) { this.nsNode.disconnect(); this.nsNode.destroy?.(); this.nsNode = null; }
+    this.dropNsNode();
   }
 }
