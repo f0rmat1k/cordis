@@ -72,9 +72,9 @@ for (const sel of $$('.ns-select')) {
   sel.onchange = async () => {
     const prev = mic.mode;
     store.set('ns-mode2', sel.value);
-    if (sel.value === 'dfn3' && !mic.dfn3Registered && mic.stream) toast('Загружаю модель DeepFilterNet3 (~24 МБ, только в первый раз)…');
     try {
-      await mic.setMode(sel.value);
+      if (mic.stream) await withLoadingToast(mic.setMode(sel.value));
+      else await mic.setMode(sel.value);
     } catch (e) {
       toast('Не удалось включить режим: ' + e.message);
       mic.mode = prev;
@@ -115,11 +115,28 @@ navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices);
   requestAnimationFrame(meterLoop);
 })();
 
+// The model normally comes from the browser cache in a fraction of a second;
+// only mention the download when it is actually taking a while.
+async function withLoadingToast(promise) {
+  let shown = false;
+  const timer = setTimeout(() => {
+    if (mic.mode === 'dfn3' && !mic.dfn3Registered) {
+      shown = true;
+      toast('Загружаю модель DeepFilterNet3 (~24 МБ)…');
+    }
+  }, 1000);
+  try {
+    return await promise;
+  } finally {
+    clearTimeout(timer);
+    if (shown) $('#toast').classList.add('hidden');
+  }
+}
+
 async function ensureMic() {
   if (!window.isSecureContext) throw new Error('Микрофон доступен только по HTTPS');
-  if (mic.mode === 'dfn3' && !mic.dfn3Registered) toast('Загружаю модель DeepFilterNet3 (~24 МБ, только в первый раз)…');
   try {
-    await mic.start(mic.mode, store.get('mic') || undefined);
+    await withLoadingToast(mic.start(mic.mode, store.get('mic') || undefined));
   } catch (e) {
     if (mic.mode !== 'dfn3' || e.name === 'NotAllowedError' || e.name === 'NotFoundError') throw e;
     // Model unavailable (e.g. the server is still downloading it): don't block the call.

@@ -27,7 +27,23 @@ const loadWasm = {
 };
 const workletUrl = { gtcrn: '/ns/gtcrn/workletProcessor.js', rnnoise: '/ns/rnnoise/workletProcessor.js' };
 
-// DeepFilterNet3: ~24 MB of wasm + model, fetched once and then cached by the browser.
+// DeepFilterNet3: ~24 MB of wasm + model. Chrome's HTTP cache often refuses entries
+// this big, so keep them in Cache Storage ourselves. File URLs are versioned (v3/...),
+// so a model update just lands under a new key.
+const MODEL_CACHE = 'cordis-models';
+
+async function cachedArrayBuffer(url) {
+  let cache;
+  try { cache = await caches.open(MODEL_CACHE); } catch { /* no Cache Storage (e.g. private mode) */ }
+  let res = await cache?.match(url);
+  if (!res) {
+    res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+    await cache?.put(url, res.clone()).catch(() => {});
+  }
+  return res.arrayBuffer();
+}
+
 let dfn3Core;
 const loadDfn3 = async () => {
   if (!dfn3Core) {
@@ -37,6 +53,7 @@ const loadDfn3 = async () => {
         sampleRate: 48000,
         assetConfig: { cdnUrl: `${location.origin}/models/dfn3` },
       });
+      core.assetLoader.fetchAsset = cachedArrayBuffer;
       await core.initialize();
       return core;
     })();
