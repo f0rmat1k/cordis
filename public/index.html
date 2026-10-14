@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cordis</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Login -->
+  <section id="login" class="screen hidden">
+    <div class="card narrow">
+      <h1>cordis</h1>
+      <p class="muted">Звонки друзьям с нейросетевым шумоподавлением</p>
+      <form id="login-form">
+        <input id="login-name" placeholder="Ваше имя" autocomplete="off" maxlength="24" required>
+        <button class="primary">Войти</button>
+      </form>
+      <p id="login-hint" class="muted small"></p>
+    </div>
+  </section>
+
+  <!-- Main -->
+  <section id="main" class="screen hidden">
+    <header>
+      <div class="me"><span class="dot online"></span><b id="me-name"></b></div>
+      <button id="copy-link" class="ghost">Скопировать ссылку-приглашение</button>
+    </header>
+
+    <div class="card">
+      <h2>Контакты</h2>
+      <form id="add-form" class="row">
+        <input id="add-name" placeholder="Имя друга" autocomplete="off" required>
+        <button>Добавить</button>
+      </form>
+      <ul id="contacts"></ul>
+      <p id="contacts-empty" class="muted small">Пока пусто. Добавьте друга по имени или отправьте ему ссылку-приглашение.</p>
+    </div>
+
+    <div class="card">
+      <h2>Микрофон</h2>
+      <label>Шумоподавление <select class="ns-select"></select></label>
+      <label>Устройство <select id="mic-select"><option value="">По умолчанию</option></select></label>
+      <div class="row">
+        <button id="mic-test">Проверить микрофон</button>
+        <div class="meter"><div class="meter-fill"></div></div>
+      </div>
+      <p class="muted small">В режиме проверки вы слышите себя уже после шумодава — надевайте наушники.</p>
+    </div>
+  </section>
+
+  <!-- Call overlay -->
+  <section id="call" class="overlay hidden">
+    <div class="card narrow center">
+      <div class="avatar" id="call-avatar"></div>
+      <h2 id="call-peer"></h2>
+      <p id="call-status" class="muted"></p>
+      <div class="meter"><div class="meter-fill"></div></div>
+      <label class="inline">Шумоподавление <select class="ns-select"></select></label>
+      <div class="row center" id="call-incoming-actions">
+        <button id="call-accept" class="primary">Принять</button>
+        <button id="call-decline" class="danger">Отклонить</button>
+      </div>
+      <div class="row center" id="call-active-actions">
+        <button id="call-mute">Выкл. микрофон</button>
+        <button id="call-hangup" class="danger">Завершить</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+  <audio id="remote-audio" autoplay></audio>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

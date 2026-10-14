@@ -1,0 +1,15 @@
+# HTTPS-прокси перед cordis на нестандартном порту.
+# Сертификат Let's Encrypt выдаётся через DNS-проверку DuckDNS,
+# поэтому порты 80 и 443 не нужны.
+# Переменные окружения задаёт start.ps1: DOMAIN, HTTPS_PORT, DUCKDNS_TOKEN.
+{
+	auto_https disable_redirects
+}
+
+{$DOMAIN}:{$HTTPS_PORT} {
+	tls {
+		dns duckdns {$DUCKDNS_TOKEN}
+	}
+	encode gzip
+	reverse_proxy localhost:3000
+}
