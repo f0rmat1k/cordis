@@ -18,6 +18,13 @@ const peers = new Map(); // id -> { id, name, muted, pc, pending, queue, audio, 
 let micState = 'starting'; // 'starting' | 'on' | 'denied'
 let muted = false;
 
+// Event log for the ?debug panel (kept always, it's tiny).
+const debugLog = [];
+function dbg(text) {
+  debugLog.push(`${new Date().toTimeString().slice(0, 8)} ${text}`);
+  if (debugLog.length > 60) debugLog.shift();
+}
+
 // ---------- UI helpers ----------
 let toastTimer;
 function toast(text) {
@@ -184,8 +191,10 @@ async function startMic() {
   try {
     await ensureMic();
     micState = 'on';
+    dbg(`микрофон: ок, шумодав ${mic.mode}`);
   } catch (e) {
     micState = 'denied';
+    dbg(`микрофон: ${e.name} ${e.message}`);
     toast('Нет доступа к микрофону: ' + e.message);
   }
   render();
@@ -259,9 +268,13 @@ const signal = (to, data) => sendMsg({ type: 'signal', to, data });
 
 function connect() {
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-  ws.onopen = () => sendMsg({ type: 'join', name: myName, muted });
+  ws.onopen = () => {
+    dbg('сервер: подключено');
+    sendMsg({ type: 'join', name: myName, muted });
+  };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = () => {
+    dbg('сервер: соединение потеряно');
     for (const id of [...peers.keys()]) removePeer(id);
     myId = null;
     render();
@@ -274,6 +287,7 @@ function handle(msg) {
     case 'welcome':
       myId = msg.id;
       iceServers = msg.iceServers;
+      dbg(`мой id ${myId}, в звонке ещё ${msg.peers.length}`);
       for (const p of msg.peers) addPeer(p);
       render();
       break;
@@ -297,7 +311,7 @@ function handle(msg) {
       const p = peers.get(msg.from);
       // Process each peer's messages strictly in order: an ICE candidate must
       // not overtake the offer it belongs to.
-      if (p) p.queue = p.queue.then(() => onSignal(p, msg.data)).catch((e) => console.warn('signal', e));
+      if (p) p.queue = p.queue.then(() => onSignal(p, msg.data)).catch((e) => dbg(`${p.name}: ошибка ${e.name} ${e.message}`));
       break;
     }
   }
@@ -306,8 +320,9 @@ function handle(msg) {
 // ---------- peers ----------
 function addPeer({ id, name, muted }) {
   if (peers.has(id)) return;
-  const p = { id, name, muted, pending: [], queue: Promise.resolve(), restarts: 0, state: 'new' };
+  const p = { id, name, muted, pending: [], queue: Promise.resolve(), restarts: 0, state: 'new', local: {}, remote: {} };
   peers.set(id, p);
+  dbg(`+ ${name} (${id})`);
   p.pc = createPC(p);
   if (myId < id) p.queue = p.queue.then(() => sendOffer(p));
 }
@@ -316,6 +331,7 @@ function removePeer(id) {
   const p = peers.get(id);
   if (!p) return;
   peers.delete(id);
+  dbg(`- ${p.name}`);
   clearTimeout(p.retry);
   p.pc.close();
   p.source?.disconnect();
@@ -326,11 +342,17 @@ function createPC(p) {
   mic.init();
   const pc = new RTCPeerConnection({ iceServers });
   pc.addTrack(mic.out.stream.getAudioTracks()[0], mic.out.stream);
-  pc.onicecandidate = (e) => e.candidate && signal(p.id, { kind: 'ice', candidate: e.candidate });
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) return dbg(`${p.name}: свои кандидаты собраны (${fmtTypes(p.local)})`);
+    countType(p.local, e.candidate.candidate);
+    signal(p.id, { kind: 'ice', candidate: e.candidate });
+  };
+  pc.oniceconnectionstatechange = () => dbg(`${p.name}: ice ${pc.iceConnectionState}`);
   pc.ontrack = (e) => attachAudio(p, e.streams[0]);
   pc.onconnectionstatechange = () => {
     if (peers.get(p.id) !== p) return;
     p.state = pc.connectionState;
+    dbg(`${p.name}: ${p.state}`);
     if (p.state === 'connected') {
       p.restarts = 0;
       tuneSender(pc);
@@ -375,6 +397,7 @@ async function sendOffer(p, iceRestart = false) {
   if (peers.get(p.id) !== p) return;
   await p.pc.setLocalDescription(await p.pc.createOffer({ iceRestart }));
   signal(p.id, { kind: 'offer', sdp: p.pc.localDescription });
+  dbg(`${p.name}: отправлен offer${iceRestart ? ' (ICE restart)' : ''}`);
 }
 
 async function flushCandidates(p) {
@@ -385,20 +408,87 @@ async function flushCandidates(p) {
 async function onSignal(p, data) {
   switch (data.kind) {
     case 'offer':
+      dbg(`${p.name}: получен offer`);
       await p.pc.setRemoteDescription(data.sdp);
       await flushCandidates(p);
       await p.pc.setLocalDescription(await p.pc.createAnswer());
       signal(p.id, { kind: 'answer', sdp: p.pc.localDescription });
+      dbg(`${p.name}: отправлен answer`);
       break;
     case 'answer':
+      dbg(`${p.name}: получен answer`);
       await p.pc.setRemoteDescription(data.sdp);
       await flushCandidates(p);
       break;
     case 'ice':
+      countType(p.remote, data.candidate?.candidate);
       if (p.pc.remoteDescription) await p.pc.addIceCandidate(data.candidate).catch(() => {});
       else p.pending.push(data.candidate);
       break;
   }
+}
+
+// ---------- ?debug panel ----------
+// host = local network address, srflx = public address found via STUN,
+// relay = via TURN. srflx on both sides but no connection means NAT needs TURN.
+const candType = (c) => / typ (\w+)/.exec(c || '')?.[1];
+function countType(map, c) {
+  const t = candType(c);
+  if (t) map[t] = (map[t] || 0) + 1;
+}
+const fmtTypes = (map) => Object.entries(map).map(([t, n]) => `${t}×${n}`).join(' ') || 'нет';
+
+async function pairInfo(pc) {
+  const stats = await pc.getStats();
+  const states = {};
+  let pair;
+  stats.forEach((s) => {
+    if (s.type === 'transport' && s.selectedCandidatePairId) pair = stats.get(s.selectedCandidatePairId);
+    if (s.type !== 'candidate-pair') return;
+    states[s.state] = (states[s.state] || 0) + 1;
+    if (s.selected) pair ??= s; // Firefox has no transport stats
+  });
+  let line = `проверки пар: ${fmtTypes(states)}`;
+  if (pair) {
+    const l = stats.get(pair.localCandidateId);
+    const r = stats.get(pair.remoteCandidateId);
+    const kb = (b) => `${Math.round((b || 0) / 1024)} КБ`;
+    line += `\n  выбрана пара: ${l?.candidateType}/${l?.protocol} ↔ ${r?.candidateType}, `
+      + `отправлено ${kb(pair.bytesSent)}, получено ${kb(pair.bytesReceived)}`
+      + (pair.currentRoundTripTime != null ? `, пинг ${Math.round(pair.currentRoundTripTime * 1000)} мс` : '');
+  }
+  return line;
+}
+
+async function debugReport() {
+  const lines = [
+    `мой id: ${myId || '—'}, сервер: ${['подключение', 'ок', 'закрывается', 'отключён'][ws?.readyState] ?? '—'}`,
+    `микрофон: ${micState}, аудио: ${mic.ctx?.state}, автоплей заблокирован: ${playBlocked ? 'да' : 'нет'}`,
+    `ICE-серверы: ${iceServers.flatMap((s) => [].concat(s.urls)).join(', ') || '—'}`,
+    navigator.userAgent,
+  ];
+  for (const p of peers.values()) {
+    const pc = p.pc;
+    lines.push('', `▶ ${p.name} (${p.id}), offer шлёт: ${myId < p.id ? 'я' : 'он'}`,
+      `  conn ${pc.connectionState}, ice ${pc.iceConnectionState}, сбор ${pc.iceGatheringState}, sdp ${pc.signalingState}`,
+      `  кандидаты мои: ${fmtTypes(p.local)}; его: ${fmtTypes(p.remote)}`,
+      `  ${await pairInfo(pc).catch((e) => 'getStats: ' + e.message)}`);
+  }
+  lines.push('', ...debugLog);
+  return lines.join('\n');
+}
+
+if (new URLSearchParams(location.search).has('debug')) {
+  $('#debug').classList.remove('hidden');
+  setInterval(async () => ($('#debug-out').textContent = await debugReport()), 1000);
+  $('#debug-copy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(await debugReport());
+      toast('Скопировано');
+    } catch {
+      toast('Не получилось — выделите текст вручную');
+    }
+  };
 }
 
 // ---------- start ----------
