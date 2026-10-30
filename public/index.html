@@ -10,72 +10,45 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <!-- Login -->
-  <section id="login" class="screen hidden">
-    <div class="card narrow">
-      <h1>cordis</h1>
-      <p class="muted">Звонки друзьям с нейросетевым шумоподавлением</p>
-      <form id="login-form">
-        <input id="login-name" placeholder="Ваше имя" autocomplete="off" maxlength="24" required>
-        <button type="button" id="login-random" class="icon ghost" title="Другое случайное имя">🎲</button>
-        <button class="primary">Войти</button>
-      </form>
-      <p id="login-hint" class="muted small"></p>
-    </div>
-  </section>
-
-  <!-- Main -->
-  <section id="main" class="screen hidden">
+  <section id="main" class="screen">
     <header>
-      <div class="me"><span class="dot online"></span><b id="me-name"></b></div>
-      <button id="copy-link" class="ghost">Скопировать ссылку-приглашение</button>
+      <h1>cordis</h1>
+      <button id="copy-link" class="ghost">Скопировать ссылку</button>
     </header>
 
+    <button id="sound-banner" class="banner hidden">🔊 Нажмите, чтобы включить звук</button>
+
     <div class="card">
-      <h2>Контакты</h2>
-      <form id="add-form" class="row">
-        <input id="add-name" placeholder="Имя друга" autocomplete="off" required>
-        <button>Добавить</button>
-      </form>
-      <ul id="contacts"></ul>
-      <p id="contacts-empty" class="muted small">Пока пусто. Добавьте друга по имени или отправьте ему ссылку-приглашение.</p>
+      <h2 id="call-title">Подключение…</h2>
+      <ul id="tiles"></ul>
+      <p id="alone" class="muted small hidden">Кроме вас никого нет. Отправьте друзьям ссылку — они сразу окажутся в звонке.</p>
+      <div class="row center controls">
+        <button id="mute">Выкл. микрофон</button>
+        <button id="mic-retry" class="primary hidden">Разрешить микрофон</button>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Микрофон</h2>
+      <h2>Настройки</h2>
+      <label>Ваше имя
+        <span class="row">
+          <input id="name" autocomplete="off" maxlength="24">
+          <button type="button" id="name-random" class="icon ghost" title="Случайное имя">🎲</button>
+        </span>
+      </label>
       <label>Шумоподавление <select class="ns-select"></select></label>
       <label class="strength"><span>Сила подавления: <b class="ns-strength-value"></b></span><input type="range" class="ns-strength" min="10" max="100" step="5"></label>
-      <label>Устройство <select id="mic-select"><option value="">По умолчанию</option></select></label>
+      <label>Микрофон <select id="mic-select"><option value="">По умолчанию</option></select></label>
       <div class="row">
-        <button id="mic-test">Проверить микрофон</button>
+        <button id="mic-test">Слышать себя</button>
         <div class="meter"><div class="meter-fill"></div></div>
       </div>
-      <p class="muted small">В режиме проверки вы слышите себя уже после шумодава — надевайте наушники.</p>
-    </div>
-  </section>
-
-  <!-- Call overlay -->
-  <section id="call" class="overlay hidden">
-    <div class="card narrow center">
-      <div class="avatar" id="call-avatar"></div>
-      <h2 id="call-peer"></h2>
-      <p id="call-status" class="muted"></p>
-      <div class="meter"><div class="meter-fill"></div></div>
-      <label class="inline">Шумоподавление <select class="ns-select"></select></label>
-      <label class="strength inline"><span>Сила подавления: <b class="ns-strength-value"></b></span><input type="range" class="ns-strength" min="10" max="100" step="5"></label>
-      <div class="row center" id="call-incoming-actions">
-        <button id="call-accept" class="primary">Принять</button>
-        <button id="call-decline" class="danger">Отклонить</button>
-      </div>
-      <div class="row center" id="call-active-actions">
-        <button id="call-mute">Выкл. микрофон</button>
-        <button id="call-hangup" class="danger">Завершить</button>
-      </div>
+      <p class="muted small">«Слышать себя» — проверка шумодава, надевайте наушники.</p>
     </div>
   </section>
 
   <div id="toast" class="toast hidden"></div>
-  <audio id="remote-audio" autoplay></audio>
+  <div id="audios" hidden></div>
 
   <script type="module" src="/app.js"></script>
 </body>

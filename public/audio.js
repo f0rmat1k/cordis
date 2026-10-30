@@ -75,20 +75,26 @@ export class MicPipeline {
     this.loadedWorklets = new Set();
   }
 
-  async start(mode = this.mode, deviceId) {
+  // Builds the output graph without touching the mic, so the outgoing track
+  // exists (silent) before the mic is allowed and never changes afterwards.
+  init() {
+    if (this.ctx) return;
     // Both models are trained for 48 kHz input.
-    this.ctx ??= new AudioContext({ sampleRate: 48000 });
-    await this.ctx.resume();
+    this.ctx = new AudioContext({ sampleRate: 48000 });
+    this.out = this.ctx.createMediaStreamDestination();
+    // Everything after this point is mono; the destination upmixes it to both ears.
+    this.gain = new GainNode(this.ctx, { channelCount: 1, channelCountMode: 'explicit' });
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 512;
+    this.gain.connect(this.out);
+    this.gain.connect(this.analyser);
+  }
 
-    if (!this.out) {
-      this.out = this.ctx.createMediaStreamDestination();
-      // Everything after this point is mono; the destination upmixes it to both ears.
-      this.gain = new GainNode(this.ctx, { channelCount: 1, channelCountMode: 'explicit' });
-      this.analyser = this.ctx.createAnalyser();
-      this.analyser.fftSize = 512;
-      this.gain.connect(this.out);
-      this.gain.connect(this.analyser);
-    }
+  async start(mode = this.mode, deviceId) {
+    this.init();
+    // Without a user gesture the context stays suspended and resume() never
+    // settles, so don't wait for it; the page resumes it on the first click.
+    this.ctx.resume().catch(() => {});
 
     this.deviceId = deviceId ?? this.deviceId;
     this.mode = mode;
@@ -191,12 +197,7 @@ export class MicPipeline {
 
   // 0..1 RMS level of the processed signal.
   level() {
-    if (!this.analyser) return 0;
-    const buf = new Float32Array(this.analyser.fftSize);
-    this.analyser.getFloatTimeDomainData(buf);
-    let sum = 0;
-    for (const v of buf) sum += v * v;
-    return Math.min(1, Math.sqrt(sum / buf.length) * 4);
+    return levelOf(this.analyser);
   }
 
   stop() {
@@ -207,4 +208,14 @@ export class MicPipeline {
     this.source = null;
     this.dropNsNode();
   }
+}
+
+// 0..1 RMS level of whatever feeds the analyser.
+export function levelOf(analyser) {
+  if (!analyser) return 0;
+  const buf = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buf);
+  let sum = 0;
+  for (const v of buf) sum += v * v;
+  return Math.min(1, Math.sqrt(sum / buf.length) * 4);
 }

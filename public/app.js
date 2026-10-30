@@ -1,4 +1,4 @@
-import { MicPipeline, MODES, DEFAULT_STRENGTH } from './audio.js';
+import { MicPipeline, MODES, DEFAULT_STRENGTH, levelOf } from './audio.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -7,23 +7,18 @@ const mic = new MicPipeline();
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
-  del: (k) => { try { localStorage.removeItem(k); } catch {} },
 };
 
+// One shared call: everyone with the page open is connected to everyone else
+// (full mesh). The peer with the smaller id sends the offer.
 let ws;
-let me = null;
-let contacts = [];
+let myId = null;
 let iceServers = [];
-let call = null; // { peer, state: 'outgoing'|'incoming'|'connecting'|'active', pc, pending: [], startedAt }
-
-// Invite link: ?add=<name> adds that person to contacts after login.
-const pendingAdd = new URLSearchParams(location.search).get('add');
+const peers = new Map(); // id -> { id, name, muted, pc, pending, queue, audio, analyser, state }
+let micState = 'starting'; // 'starting' | 'on' | 'denied'
+let muted = false;
 
 // ---------- UI helpers ----------
-function show(id) {
-  for (const s of ['login', 'main']) $('#' + s).classList.toggle('hidden', s !== id);
-}
-
 let toastTimer;
 function toast(text) {
   const t = $('#toast');
@@ -33,29 +28,72 @@ function toast(text) {
   toastTimer = setTimeout(() => t.classList.add('hidden'), 3500);
 }
 
-function renderContacts() {
-  const ul = $('#contacts');
-  ul.innerHTML = '';
-  $('#contacts-empty').classList.toggle('hidden', contacts.length > 0);
-  const sorted = [...contacts].sort((a, b) => b.online - a.online || a.name.localeCompare(b.name));
-  for (const c of sorted) {
-    const li = document.createElement('li');
-    li.innerHTML = `<span class="dot"></span><span class="name"></span>
-      <button class="call">Позвонить</button><button class="icon ghost" title="Удалить">✕</button>`;
-    li.querySelector('.dot').classList.toggle('online', c.online);
-    li.querySelector('.name').textContent = c.name;
-    const callBtn = li.querySelector('.call');
-    callBtn.disabled = !c.online || !!call;
-    callBtn.title = c.online ? '' : 'Не в сети';
-    callBtn.onclick = () => startCall(c.name);
-    li.querySelector('.icon').onclick = () => {
-      if (confirm(`Удалить ${c.name} из контактов?`)) sendMsg({ type: 'remove-contact', name: c.name });
-    };
-    ul.append(li);
-  }
+function tile(id, name, { you, muted, note }) {
+  const li = document.createElement('li');
+  li.dataset.id = id;
+  li.innerHTML = `<div class="avatar"></div><div class="name"></div><div class="muted small note"></div>`;
+  li.querySelector('.avatar').textContent = (name[0] || '?').toUpperCase();
+  li.querySelector('.name').textContent = name + (you ? ' (вы)' : '');
+  li.querySelector('.note').textContent = note || '';
+  li.classList.toggle('is-muted', !!muted);
+  return li;
 }
 
-// Noise-suppression selects (one in settings, one in the call window).
+function render() {
+  const ul = $('#tiles');
+  ul.innerHTML = '';
+  const selfNote = { starting: 'включаю микрофон…', denied: 'нет микрофона' }[micState] || (muted ? 'микрофон выкл.' : '');
+  ul.append(tile(myId || 'me', myName, { you: true, muted: muted || micState !== 'on', note: selfNote }));
+  for (const p of peers.values()) {
+    const note = p.state === 'connected' ? (p.muted ? 'микрофон выкл.' : '')
+      : p.state === 'failed' ? 'нет соединения' : 'соединение…';
+    ul.append(tile(p.id, p.name, { muted: p.muted, note }));
+  }
+  const n = peers.size + 1;
+  $('#call-title').textContent = myId ? `В звонке: ${n}` : 'Подключение…';
+  $('#alone').classList.toggle('hidden', !myId || peers.size > 0);
+  $('#mic-retry').classList.toggle('hidden', micState !== 'denied');
+  $('#mute').classList.toggle('hidden', micState === 'denied');
+  $('#mute').textContent = muted ? 'Вкл. микрофон' : 'Выкл. микрофон';
+  $('#mute').classList.toggle('active', muted);
+}
+
+// ---------- name ----------
+const ADJECTIVES = ['Весёлый', 'Хитрый', 'Сонный', 'Быстрый', 'Тихий', 'Смелый', 'Добрый', 'Ловкий',
+  'Мудрый', 'Рыжий', 'Шустрый', 'Важный', 'Бодрый', 'Пушистый', 'Звонкий', 'Ясный'];
+const ANIMALS = ['Ёж', 'Лис', 'Барсук', 'Енот', 'Кот', 'Волк', 'Филин', 'Бобр', 'Медведь', 'Заяц',
+  'Сокол', 'Тюлень', 'Пингвин', 'Хомяк', 'Олень', 'Дельфин'];
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
+const randomName = () => pick(ADJECTIVES) + pick(ANIMALS) + Math.floor(10 + Math.random() * 90);
+
+let myName = store.get('name') || randomName();
+store.set('name', myName);
+$('#name').value = myName;
+
+function setName(name) {
+  name = name.trim().slice(0, 24);
+  if (!name || name === myName) return;
+  myName = name;
+  store.set('name', name);
+  $('#name').value = name;
+  sendMsg({ type: 'update', name });
+  render();
+}
+$('#name').onchange = () => setName($('#name').value);
+$('#name').onkeydown = (e) => e.key === 'Enter' && e.target.blur();
+$('#name-random').onclick = () => setName(randomName());
+
+$('#copy-link').onclick = async () => {
+  const link = location.origin + '/';
+  try {
+    await navigator.clipboard.writeText(link);
+    toast('Ссылка скопирована — отправьте её друзьям');
+  } catch {
+    prompt('Скопируйте ссылку:', link);
+  }
+};
+
+// ---------- noise suppression settings ----------
 // ('ns-mode2': the default changed to DeepFilterNet3, so old saved choices are dropped.)
 mic.mode = store.get('ns-mode2') || 'dfn3';
 mic.strength = Number(store.get('ns-strength')) || DEFAULT_STRENGTH;
@@ -108,13 +146,6 @@ $('#mic-select').onchange = async (e) => {
 };
 navigator.mediaDevices?.addEventListener?.('devicechange', refreshDevices);
 
-// Level meters.
-(function meterLoop() {
-  const level = mic.stream ? mic.level() : 0;
-  for (const m of $$('.meter-fill')) m.style.width = `${Math.round(level * 100)}%`;
-  requestAnimationFrame(meterLoop);
-})();
-
 // The model normally comes from the browser cache in a fraction of a second;
 // only mention the download when it is actually taking a while.
 async function withLoadingToast(promise) {
@@ -147,61 +178,80 @@ async function ensureMic() {
   refreshDevices();
 }
 
-let testing = false;
-$('#mic-test').onclick = async () => {
-  const btn = $('#mic-test');
-  if (testing) {
-    testing = false;
-    mic.monitor = false;
-    if (!call) mic.stop();
-    btn.textContent = 'Проверить микрофон';
-    btn.classList.remove('active');
-    return;
-  }
+async function startMic() {
+  micState = 'starting';
+  render();
   try {
     await ensureMic();
-    mic.monitor = true;
-    testing = true;
-    btn.textContent = 'Остановить проверку';
-    btn.classList.add('active');
+    micState = 'on';
   } catch (e) {
+    micState = 'denied';
     toast('Нет доступа к микрофону: ' + e.message);
   }
-};
-
-function stopMicTest() {
-  if (!testing) return;
-  testing = false;
-  mic.monitor = false;
-  $('#mic-test').textContent = 'Проверить микрофон';
-  $('#mic-test').classList.remove('active');
+  render();
 }
+$('#mic-retry').onclick = startMic;
 
-// ---------- tones ----------
-const tones = {
-  ctx: null,
-  timer: null,
-  beep(freqs, dur) {
-    this.ctx ??= new AudioContext();
-    this.ctx.resume().catch(() => {});
-    const t0 = this.ctx.currentTime;
-    for (const f of freqs) {
-      const o = this.ctx.createOscillator();
-      const g = this.ctx.createGain();
-      o.frequency.value = f;
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(0.08, t0 + 0.02);
-      g.gain.setValueAtTime(0.08, t0 + dur - 0.05);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-      o.connect(g).connect(this.ctx.destination);
-      o.start(t0);
-      o.stop(t0 + dur);
-    }
-  },
-  ringback() { this.stop(); const p = () => this.beep([425], 1); p(); this.timer = setInterval(p, 4000); },
-  ring() { this.stop(); const p = () => { this.beep([660, 880], 0.4); setTimeout(() => this.beep([660, 880], 0.4), 500); }; p(); this.timer = setInterval(p, 2500); },
-  stop() { clearInterval(this.timer); this.timer = null; },
+$('#mute').onclick = () => {
+  muted = !muted;
+  mic.muted = muted;
+  sendMsg({ type: 'update', muted });
+  render();
 };
+
+let monitoring = false;
+$('#mic-test').onclick = () => {
+  monitoring = !monitoring;
+  mic.monitor = monitoring;
+  $('#mic-test').classList.toggle('active', monitoring);
+};
+
+// ---------- sound unlock ----------
+// Browsers keep audio suspended until the first click on the page. Until then
+// we neither hear the others nor send them our voice, so ask for that click.
+let playBlocked = false;
+function updateSoundBanner() {
+  const blocked = playBlocked || mic.ctx?.state === 'suspended';
+  $('#sound-banner').classList.toggle('hidden', !blocked);
+}
+function unlockSound() {
+  mic.ctx?.resume().catch(() => {});
+  playBlocked = false;
+  for (const p of peers.values()) p.audio?.play().catch(() => (playBlocked = true));
+  setTimeout(updateSoundBanner, 100);
+}
+document.addEventListener('pointerdown', unlockSound);
+document.addEventListener('keydown', unlockSound);
+
+// ---------- meters / speaking indicators ----------
+const SPEAKING = 0.06;
+(function meterLoop() {
+  const level = mic.stream ? mic.level() : 0;
+  for (const m of $$('.meter-fill')) m.style.width = `${Math.round(level * 100)}%`;
+  for (const li of $$('#tiles li')) {
+    const p = peers.get(li.dataset.id);
+    const l = p ? levelOf(p.analyser) : level;
+    li.classList.toggle('speaking', l > SPEAKING);
+  }
+  requestAnimationFrame(meterLoop);
+})();
+
+// ---------- join / leave sounds ----------
+function beep(freqs) {
+  const ctx = mic.ctx;
+  if (ctx?.state !== 'running') return;
+  let t = ctx.currentTime;
+  for (const f of freqs) {
+    const o = new OscillatorNode(ctx, { frequency: f });
+    const g = new GainNode(ctx, { gain: 0.0001 });
+    g.gain.exponentialRampToValueAtTime(0.06, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+    o.connect(g).connect(ctx.destination);
+    o.start(t);
+    o.stop(t + 0.16);
+    t += 0.12;
+  }
+}
 
 // ---------- signaling ----------
 function sendMsg(m) { if (ws?.readyState === 1) ws.send(JSON.stringify(m)); }
@@ -209,291 +259,153 @@ const signal = (to, data) => sendMsg({ type: 'signal', to, data });
 
 function connect() {
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-  ws.onopen = () => {
-    const token = store.get('token');
-    if (token) sendMsg({ type: 'auth', token });
-    else showLogin();
-  };
+  ws.onopen = () => sendMsg({ type: 'join', name: myName, muted });
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = () => {
-    if (call) endCall('Соединение с сервером потеряно');
+    for (const id of [...peers.keys()]) removePeer(id);
+    myId = null;
+    render();
     setTimeout(connect, 2000);
   };
 }
 
-// Random name so you can just press «Войти»; must fit the server's NAME_RE (≤ 24 chars).
-const ADJECTIVES = ['Весёлый', 'Хитрый', 'Сонный', 'Быстрый', 'Тихий', 'Смелый', 'Добрый', 'Ловкий',
-  'Мудрый', 'Рыжий', 'Шустрый', 'Важный', 'Бодрый', 'Пушистый', 'Звонкий', 'Ясный'];
-const ANIMALS = ['Ёж', 'Лис', 'Барсук', 'Енот', 'Кот', 'Волк', 'Филин', 'Бобр', 'Медведь', 'Заяц',
-  'Сокол', 'Тюлень', 'Пингвин', 'Хомяк', 'Олень', 'Дельфин'];
-const pick = (a) => a[Math.floor(Math.random() * a.length)];
-const randomName = () => pick(ADJECTIVES) + pick(ANIMALS) + Math.floor(10 + Math.random() * 90);
-let generatedName = null; // name in the field, if we made it up
-
-function fillRandomName() {
-  generatedName = randomName();
-  $('#login-name').value = generatedName;
-  $('#login-name').select();
-}
-
-function showLogin() {
-  show('login');
-  $('#login-hint').textContent = pendingAdd ? `После входа ${pendingAdd} появится в ваших контактах.` : '';
-  if (!$('#login-name').value) fillRandomName();
-  $('#login-name').focus();
-  $('#login-name').select();
-}
-
-$('#login-random').onclick = () => {
-  fillRandomName();
-  $('#login-name').focus();
-};
-
-$('#login-form').onsubmit = (e) => {
-  e.preventDefault();
-  sendMsg({ type: 'register', name: $('#login-name').value.trim() });
-};
-
-$('#add-form').onsubmit = (e) => {
-  e.preventDefault();
-  sendMsg({ type: 'add-contact', name: $('#add-name').value.trim() });
-  $('#add-name').value = '';
-};
-
-$('#copy-link').onclick = async () => {
-  const link = `${location.origin}/?add=${encodeURIComponent(me)}`;
-  try {
-    await navigator.clipboard.writeText(link);
-    toast('Ссылка скопирована — отправьте её другу');
-  } catch {
-    prompt('Скопируйте ссылку:', link);
-  }
-};
-
 function handle(msg) {
   switch (msg.type) {
     case 'welcome':
-      me = msg.name;
-      contacts = msg.contacts;
+      myId = msg.id;
       iceServers = msg.iceServers;
-      store.set('token', msg.token);
-      $('#me-name').textContent = me;
-      show('main');
-      renderContacts();
-      if (pendingAdd && pendingAdd !== me && !contacts.some((c) => c.name === pendingAdd)) {
-        sendMsg({ type: 'add-contact', name: pendingAdd });
-      }
-      if (pendingAdd) history.replaceState(null, '', '/');
+      for (const p of msg.peers) addPeer(p);
+      render();
       break;
-    case 'auth-failed':
-      store.del('token');
-      showLogin();
+    case 'peer-joined':
+      addPeer(msg.peer);
+      beep([660, 880]);
+      render();
       break;
-    case 'contacts':
-      contacts = msg.contacts;
-      renderContacts();
+    case 'peer-left':
+      if (peers.has(msg.id)) beep([880, 660]);
+      removePeer(msg.id);
+      render();
       break;
-    case 'presence': {
-      const c = contacts.find((c) => c.name === msg.name);
-      if (c) c.online = msg.online;
-      renderContacts();
-      if (!msg.online && call?.peer === msg.name) endCall(`${msg.name} отключился`);
+    case 'peer-updated': {
+      const p = peers.get(msg.peer.id);
+      if (p) Object.assign(p, { name: msg.peer.name, muted: msg.peer.muted });
+      render();
       break;
     }
-    case 'signal':
-      onSignal(msg.from, msg.data);
+    case 'signal': {
+      const p = peers.get(msg.from);
+      // Process each peer's messages strictly in order: an ICE candidate must
+      // not overtake the offer it belongs to.
+      if (p) p.queue = p.queue.then(() => onSignal(p, msg.data)).catch((e) => console.warn('signal', e));
       break;
-    case 'error':
-      // Made-up name collided with an existing one — quietly try another.
-      if (msg.message === 'Это имя уже занято' && !me && $('#login-name').value === generatedName) {
-        fillRandomName();
-        sendMsg({ type: 'register', name: generatedName });
-        break;
-      }
-      toast(msg.message);
-      break;
+    }
   }
 }
 
-// ---------- calls ----------
-function setCallUI() {
-  const ov = $('#call');
-  if (!call) { ov.classList.add('hidden'); document.title = 'cordis'; renderContacts(); return; }
-  ov.classList.remove('hidden');
-  $('#call-peer').textContent = call.peer;
-  $('#call-avatar').textContent = call.peer[0].toUpperCase();
-  const status = {
-    outgoing: 'Вызов…',
-    incoming: 'Входящий звонок',
-    connecting: 'Соединение…',
-    active: '',
-  }[call.state];
-  if (status) $('#call-status').textContent = status;
-  $('#call-incoming-actions').classList.toggle('hidden', call.state !== 'incoming');
-  $('#call-active-actions').classList.toggle('hidden', call.state === 'incoming');
-  document.title = call.state === 'incoming' ? `📞 ${call.peer} звонит` : 'cordis';
-  renderContacts();
+// ---------- peers ----------
+function addPeer({ id, name, muted }) {
+  if (peers.has(id)) return;
+  const p = { id, name, muted, pending: [], queue: Promise.resolve(), restarts: 0, state: 'new' };
+  peers.set(id, p);
+  p.pc = createPC(p);
+  if (myId < id) p.queue = p.queue.then(() => sendOffer(p));
 }
 
-async function startCall(peer) {
-  if (call) return;
-  try {
-    await ensureMic();
-  } catch (e) {
-    return toast('Нет доступа к микрофону: ' + e.message);
-  }
-  stopMicTest();
-  call = { peer, state: 'outgoing', pending: [] };
-  call.timeout = setTimeout(() => { signal(peer, { kind: 'hangup' }); endCall('Нет ответа'); }, 45000);
-  signal(peer, { kind: 'invite' });
-  tones.ringback();
-  setCallUI();
+function removePeer(id) {
+  const p = peers.get(id);
+  if (!p) return;
+  peers.delete(id);
+  clearTimeout(p.retry);
+  p.pc.close();
+  p.source?.disconnect();
+  p.audio?.remove();
 }
 
-function createPC() {
+function createPC(p) {
+  mic.init();
   const pc = new RTCPeerConnection({ iceServers });
   pc.addTrack(mic.out.stream.getAudioTracks()[0], mic.out.stream);
-  pc.onicecandidate = (e) => e.candidate && call && signal(call.peer, { kind: 'ice', candidate: e.candidate });
-  pc.ontrack = (e) => {
-    const audio = $('#remote-audio');
-    audio.srcObject = e.streams[0];
-    audio.play().catch(() => {});
-  };
+  pc.onicecandidate = (e) => e.candidate && signal(p.id, { kind: 'ice', candidate: e.candidate });
+  pc.ontrack = (e) => attachAudio(p, e.streams[0]);
   pc.onconnectionstatechange = () => {
-    if (!call || call.pc !== pc) return;
-    if (pc.connectionState === 'connected' && call.state !== 'active') {
-      call.state = 'active';
-      call.startedAt = Date.now();
+    if (peers.get(p.id) !== p) return;
+    p.state = pc.connectionState;
+    if (p.state === 'connected') {
+      p.restarts = 0;
       tuneSender(pc);
-      setCallUI();
-      call.clock = setInterval(() => {
-        const s = Math.floor((Date.now() - call.startedAt) / 1000);
-        $('#call-status').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-      }, 500);
-      $('#call-status').textContent = '0:00';
     }
-    if (pc.connectionState === 'failed') {
-      signal(call.peer, { kind: 'hangup' });
-      endCall('Не удалось соединиться (нужен TURN-сервер?)');
+    // The offering side retries with an ICE restart a few times (network switch, Wi-Fi hiccup).
+    if (p.state === 'failed' && myId < p.id && p.restarts < 3) {
+      p.restarts++;
+      p.retry = setTimeout(() => (p.queue = p.queue.then(() => sendOffer(p, true))), 2000);
     }
+    if (p.state === 'failed' && p.restarts >= 3) toast(`Нет связи с ${p.name} (нужен TURN-сервер?)`);
+    render();
   };
   return pc;
+}
+
+function attachAudio(p, stream) {
+  if (!p.audio) {
+    p.audio = document.createElement('audio');
+    p.audio.autoplay = true;
+    $('#audios').append(p.audio);
+  }
+  p.audio.srcObject = stream;
+  p.audio.play().catch(() => { playBlocked = true; updateSoundBanner(); });
+  // Speaking indicator: tap the remote stream (it still plays through the <audio>).
+  p.source?.disconnect();
+  p.source = mic.ctx.createMediaStreamSource(stream);
+  p.analyser ??= new AnalyserNode(mic.ctx, { fftSize: 512 });
+  p.source.connect(p.analyser);
 }
 
 // Give Opus more headroom than the default (~32 kbps) for clearer voice.
 function tuneSender(pc) {
   for (const sender of pc.getSenders()) {
-    const p = sender.getParameters();
-    if (!p.encodings?.length) continue;
-    p.encodings[0].maxBitrate = 64000;
-    sender.setParameters(p).catch(() => {});
+    const params = sender.getParameters();
+    if (!params.encodings?.length) continue;
+    params.encodings[0].maxBitrate = 64000;
+    sender.setParameters(params).catch(() => {});
   }
 }
 
-async function flushCandidates() {
-  for (const c of call.pending) await call.pc.addIceCandidate(c).catch(() => {});
-  call.pending = [];
+async function sendOffer(p, iceRestart = false) {
+  if (peers.get(p.id) !== p) return;
+  await p.pc.setLocalDescription(await p.pc.createOffer({ iceRestart }));
+  signal(p.id, { kind: 'offer', sdp: p.pc.localDescription });
 }
 
-async function onSignal(from, data) {
-  if (data.kind === 'invite') {
-    if (call) return signal(from, { kind: 'busy' });
-    call = { peer: from, state: 'incoming', pending: [] };
-    tones.ring();
-    setCallUI();
-    return;
-  }
-  if (!call || call.peer !== from) return;
+async function flushCandidates(p) {
+  for (const c of p.pending) await p.pc.addIceCandidate(c).catch(() => {});
+  p.pending = [];
+}
 
+async function onSignal(p, data) {
   switch (data.kind) {
-    case 'accept': {
-      if (call.state !== 'outgoing') return;
-      clearTimeout(call.timeout);
-      tones.stop();
-      call.state = 'connecting';
-      setCallUI();
-      call.pc = createPC();
-      const offer = await call.pc.createOffer();
-      await call.pc.setLocalDescription(offer);
-      signal(from, { kind: 'offer', sdp: call.pc.localDescription });
+    case 'offer':
+      await p.pc.setRemoteDescription(data.sdp);
+      await flushCandidates(p);
+      await p.pc.setLocalDescription(await p.pc.createAnswer());
+      signal(p.id, { kind: 'answer', sdp: p.pc.localDescription });
       break;
-    }
-    case 'offer': {
-      call.pc = createPC();
-      await call.pc.setRemoteDescription(data.sdp);
-      await flushCandidates();
-      const answer = await call.pc.createAnswer();
-      await call.pc.setLocalDescription(answer);
-      signal(from, { kind: 'answer', sdp: call.pc.localDescription });
-      break;
-    }
     case 'answer':
-      await call.pc.setRemoteDescription(data.sdp);
-      await flushCandidates();
+      await p.pc.setRemoteDescription(data.sdp);
+      await flushCandidates(p);
       break;
     case 'ice':
-      if (call.pc?.remoteDescription) await call.pc.addIceCandidate(data.candidate).catch(() => {});
-      else call.pending.push(data.candidate);
+      if (p.pc.remoteDescription) await p.pc.addIceCandidate(data.candidate).catch(() => {});
+      else p.pending.push(data.candidate);
       break;
-    case 'decline': endCall(`${from} отклонил звонок`); break;
-    case 'busy': endCall(`${from} уже разговаривает`); break;
-    case 'unavailable': endCall(`${from} не в сети`); break;
-    case 'hangup': endCall(call.state === 'incoming' ? `Пропущенный звонок от ${from}` : 'Звонок завершён'); break;
   }
 }
 
-$('#call-accept').onclick = async () => {
-  if (call?.state !== 'incoming') return;
-  tones.stop();
-  try {
-    await ensureMic();
-  } catch (e) {
-    signal(call.peer, { kind: 'decline' });
-    return endCall('Нет доступа к микрофону: ' + e.message);
-  }
-  stopMicTest();
-  call.state = 'connecting';
-  setCallUI();
-  signal(call.peer, { kind: 'accept' });
-};
-
-$('#call-decline').onclick = () => {
-  if (!call) return;
-  signal(call.peer, { kind: 'decline' });
-  endCall();
-};
-
-$('#call-hangup').onclick = () => {
-  if (!call) return;
-  signal(call.peer, { kind: 'hangup' });
-  endCall('Звонок завершён');
-};
-
-let muted = false;
-$('#call-mute').onclick = () => {
-  muted = !muted;
-  mic.muted = muted;
-  $('#call-mute').textContent = muted ? 'Вкл. микрофон' : 'Выкл. микрофон';
-  $('#call-mute').classList.toggle('active', muted);
-};
-
-function endCall(message) {
-  if (!call) return;
-  tones.stop();
-  clearTimeout(call.timeout);
-  clearInterval(call.clock);
-  call.pc?.close();
-  call = null;
-  $('#remote-audio').srcObject = null;
-  muted = false;
-  mic.muted = false;
-  $('#call-mute').textContent = 'Выкл. микрофон';
-  $('#call-mute').classList.remove('active');
-  if (!testing) mic.stop();
-  setCallUI();
-  if (message) toast(message);
-}
-
-window.addEventListener('beforeunload', () => call && signal(call.peer, { kind: 'hangup' }));
-
+// ---------- start ----------
+mic.init();
+mic.ctx.onstatechange = updateSoundBanner;
+mic.muted = muted;
+render();
+updateSoundBanner();
 connect();
+startMic();
