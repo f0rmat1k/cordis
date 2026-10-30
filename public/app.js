@@ -462,7 +462,7 @@ async function pairInfo(pc) {
 
 async function debugReport() {
   const lines = [
-    `мой id: ${myId || '—'}, сервер: ${['подключение', 'ок', 'закрывается', 'отключён'][ws?.readyState] ?? '—'}`,
+    `${new Date().toTimeString().slice(0, 8)}, я: ${myName} (${myId || '—'}), сервер:${['подключение', 'ок', 'закрывается', 'отключён'][ws?.readyState] ?? '—'}`,
     `микрофон: ${micState}, аудио: ${mic.ctx?.state}, автоплей заблокирован: ${playBlocked ? 'да' : 'нет'}`,
     `ICE-серверы: ${iceServers.flatMap((s) => [].concat(s.urls)).join(', ') || '—'}`,
     navigator.userAgent,

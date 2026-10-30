@@ -12,7 +12,10 @@ const MODELS_DIR = path.join(root, 'models');
 
 // ICE servers sent to clients. STUN is enough for most home networks;
 // set TURN_URL/TURN_USER/TURN_PASS if a call connects but there is no sound.
-const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
+// Two different providers on purpose: some routers send Google traffic out
+// through another uplink (e.g. a VPN), so Google's STUN alone reports an
+// address peers can't reach; the second one finds the regular address.
+const iceServers = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
 if (process.env.TURN_URL) {
   iceServers.push({
     urls: process.env.TURN_URL.split(','),
