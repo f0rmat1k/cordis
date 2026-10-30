@@ -287,6 +287,10 @@ function handle(msg) {
     case 'welcome':
       myId = msg.id;
       iceServers = msg.iceServers;
+      if (msg.turn) {
+        const { host, port, username, credential } = msg.turn;
+        iceServers = [...iceServers, { urls: `turn:${host || location.hostname}:${port}?transport=udp`, username, credential }];
+      }
       dbg(`мой id ${myId}, в звонке ещё ${msg.peers.length}`);
       for (const p of msg.peers) addPeer(p);
       render();

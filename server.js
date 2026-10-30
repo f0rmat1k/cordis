@@ -5,6 +5,7 @@ import { writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
+import { startTurn } from './turn.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -23,6 +24,17 @@ if (process.env.TURN_URL) {
     credential: process.env.TURN_PASS,
   });
 }
+
+// Built-in TURN relay for peers that can't reach each other directly. Needs UDP
+// TURN_PORT and TURN_MIN_PORT..TURN_MAX_PORT forwarded to this machine; clients
+// reach it by the site's host name unless TURN_HOST says otherwise. TURN=off disables it.
+const turn = process.env.TURN === 'off' ? null : startTurn({
+  port: Number(process.env.TURN_PORT) || 3478,
+  minPort: Number(process.env.TURN_MIN_PORT) || 50000,
+  maxPort: Number(process.env.TURN_MAX_PORT) || 50199,
+  externalIp: process.env.TURN_EXTERNAL_IP,
+  allowPrivatePeers: process.env.TURN_ALLOW_PRIVATE === '1',
+});
 
 // ---------- http ----------
 const app = express();
@@ -84,7 +96,8 @@ wss.on('connection', (ws) => {
         const id = randomBytes(6).toString('hex');
         ws.id = id;
         peers.set(id, { ws, name: cleanName(msg.name), muted: !!msg.muted });
-        send(ws, { type: 'welcome', id, iceServers, peers: others });
+        const relay = turn && { host: process.env.TURN_HOST, port: turn.port, ...turn.credentials(id) };
+        send(ws, { type: 'welcome', id, iceServers, turn: relay, peers: others });
         broadcast({ type: 'peer-joined', peer: info(id) }, id);
         break;
       }
