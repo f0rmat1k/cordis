@@ -35,27 +35,54 @@ function toast(text) {
   toastTimer = setTimeout(() => t.classList.add('hidden'), 3500);
 }
 
-function tile(id, name, { you, muted, note }) {
-  const li = document.createElement('li');
-  li.dataset.id = id;
-  li.innerHTML = `<div class="avatar"></div><div class="name"></div><div class="muted small note"></div>`;
+// Tiles are updated in place, so a volume slider isn't torn down mid-drag.
+const tiles = new Map(); // id ('self' for me) -> <li>
+
+function tile(id, name, { you, muted, note, peer }) {
+  let li = tiles.get(id);
+  if (!li) {
+    li = document.createElement('li');
+    li.dataset.id = id;
+    li.innerHTML = `<div class="avatar"></div><div class="name"></div><div class="muted small note"></div>`;
+    if (peer) {
+      li.insertAdjacentHTML('beforeend', `<div class="volume">
+        <input type="range" min="0" max="300" step="5" aria-label="Громкость"><button class="ghost" title="Сбросить на 100%"></button></div>`);
+      const range = li.querySelector('.volume input');
+      range.oninput = () => setVolume(peer, range.value / 100);
+      li.querySelector('.volume button').onclick = () => setVolume(peer, 1);
+    }
+    tiles.set(id, li);
+  }
   li.querySelector('.avatar').textContent = (name[0] || '?').toUpperCase();
   li.querySelector('.name').textContent = name + (you ? ' (вы)' : '');
   li.querySelector('.note').textContent = note || '';
   li.classList.toggle('is-muted', !!muted);
+  if (peer) {
+    const pct = Math.round(peer.volume * 100);
+    const range = li.querySelector('.volume input');
+    if (document.activeElement !== range) range.value = pct;
+    li.querySelector('.volume button').textContent = `${pct}%`;
+    li.querySelector('.volume').classList.toggle('boosted', pct > 100);
+  }
   return li;
 }
 
 function render() {
   const ul = $('#tiles');
-  ul.innerHTML = '';
   const selfNote = { starting: 'включаю микрофон…', denied: 'нет микрофона' }[micState] || (muted ? 'микрофон выкл.' : '');
-  ul.append(tile(myId || 'me', myName, { you: true, muted: muted || micState !== 'on', note: selfNote }));
+  const list = [tile('self', myName, { you: true, muted: muted || micState !== 'on', note: selfNote })];
   for (const p of peers.values()) {
     const note = p.state === 'connected' ? (p.muted ? 'микрофон выкл.' : '')
       : p.state === 'failed' ? 'нет соединения' : 'соединение…';
-    ul.append(tile(p.id, p.name, { muted: p.muted, note }));
+    list.push(tile(p.id, p.name, { muted: p.muted, note, peer: p }));
   }
+  for (const [id, li] of tiles) {
+    if (!list.includes(li)) {
+      li.remove();
+      tiles.delete(id);
+    }
+  }
+  list.forEach((li, i) => ul.children[i] !== li && ul.insertBefore(li, ul.children[i] || null));
   const n = peers.size + 1;
   $('#call-title').textContent = myId ? `В звонке: ${n}` : 'Подключение…';
   $('#alone').classList.toggle('hidden', !myId || peers.size > 0);
@@ -325,6 +352,7 @@ function handle(msg) {
 function addPeer({ id, name, muted }) {
   if (peers.has(id)) return;
   const p = { id, name, muted, pending: [], queue: Promise.resolve(), restarts: 0, state: 'new', local: {}, remote: {} };
+  p.volume = volumes[name] ?? 1;
   peers.set(id, p);
   dbg(`+ ${name} (${id})`);
   p.pc = createPC(p);
@@ -339,6 +367,7 @@ function removePeer(id) {
   clearTimeout(p.retry);
   p.pc.close();
   p.source?.disconnect();
+  p.gain?.disconnect();
   p.audio?.remove();
 }
 
@@ -380,11 +409,40 @@ function attachAudio(p, stream) {
   }
   p.audio.srcObject = stream;
   p.audio.play().catch(() => { playBlocked = true; updateSoundBanner(); });
-  // Speaking indicator: tap the remote stream (it still plays through the <audio>).
+  // Speaking indicator and the >100% path both tap the remote stream.
   p.source?.disconnect();
   p.source = mic.ctx.createMediaStreamSource(stream);
   p.analyser ??= new AnalyserNode(mic.ctx, { fftSize: 512 });
   p.source.connect(p.analyser);
+  if (!p.gain) {
+    p.gain = new GainNode(mic.ctx, { gain: 0 });
+    p.gain.connect(mic.ctx.destination);
+  }
+  p.source.connect(p.gain);
+  applyVolume(p);
+}
+
+// Per-peer volume, remembered by name. Up to 100% the <audio> element plays the
+// stream (Chrome's echo canceller hears that path); louder needs Web Audio gain,
+// so the element is muted and the gain node plays instead.
+let volumes = {};
+try { volumes = JSON.parse(store.get('volumes')) || {}; } catch {}
+
+function setVolume(p, v) {
+  p.volume = v;
+  if (v === 1) delete volumes[p.name];
+  else volumes[p.name] = v;
+  store.set('volumes', JSON.stringify(volumes));
+  applyVolume(p);
+  render();
+}
+
+function applyVolume(p) {
+  if (!p.audio) return;
+  const boost = p.volume > 1;
+  p.audio.muted = boost;
+  p.audio.volume = Math.min(p.volume, 1);
+  p.gain.gain.value = boost ? p.volume : 0;
 }
 
 // Give Opus more headroom than the default (~32 kbps) for clearer voice.

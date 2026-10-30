@@ -82,12 +82,19 @@ button.icon { padding: 6px 10px; }
 
 #tiles {
   list-style: none; margin: 0; padding: 0;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px;
 }
 #tiles li { text-align: center; min-width: 0; }
 #tiles .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #tiles .note { min-height: 1.45em; }
 #tiles li.is-muted .avatar { opacity: .55; }
+#tiles .volume { display: flex; align-items: center; gap: 2px; }
+#tiles .volume input { width: 100%; }
+#tiles .volume button {
+  padding: 2px 4px; border: none; min-width: 3.6em;
+  font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+#tiles .volume.boosted button { color: var(--accent); font-weight: 600; }
 #tiles li.speaking .avatar { box-shadow: 0 0 0 3px var(--card), 0 0 0 6px var(--green); }
 .controls { margin-top: 16px; }
 
